@@ -1,0 +1,27 @@
+[Unit]
+Description=k3s daemon
+Documentation=https://k3s.io
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=notify
+ExecStartPre=-/sbin/modprobe br_netfilter
+ExecStartPre=-/sbin/modprobe overlay
+ExecStart=/usr/local/bin/k3s server --token {{ token }} {{ daemon_flags }}
+
+KillMode=process
+Delegate=yes
+
+# using non-zero limits can cause performance problems due to accounting overhead in the kernel.
+# docs recommend using cgroups to do container-local accounting instead. use defaults for now...
+LimitNOFILE=1048576
+LimitNPROC=infinity
+LimitCORE=infinity
+TasksMax=infinity
+TimeoutStartSec=0
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

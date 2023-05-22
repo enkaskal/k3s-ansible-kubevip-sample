@@ -1,0 +1,226 @@
+############################################
+# RBAC                                     #
+# ref: https://kube-vip.io/docs/usage/k3s/ #
+############################################
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kube-vip
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  annotations:
+    rbac.authorization.kubernetes.io/autoupdate: "true"
+  name: system:kube-vip-role
+rules:
+  - apiGroups: [""]
+    resources: ["services", "services/status", "nodes", "endpoints"]
+    verbs: ["list","get","watch", "update"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["list", "get", "watch", "update", "create"]
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: system:kube-vip-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:kube-vip-role
+subjects:
+- kind: ServiceAccount
+  name: kube-vip
+  namespace: kube-system
+
+#########################################################
+# control plane HA daemon set                           #
+# ref: https://kube-vip.io/docs/installation/daemonset/ #
+#########################################################
+
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  creationTimestamp: null
+  name: kube-vip-ds
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      name: kube-vip-ds
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        name: kube-vip-ds
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: node-role.kubernetes.io/master
+                operator: Exists
+            - matchExpressions:
+              - key: node-role.kubernetes.io/control-plane
+                operator: Exists
+      containers:
+      - args:
+        - manager
+        env:
+        - name: vip_arp
+          value: "true"
+        - name: port
+          value: "6443"
+        - name: vip_interface
+          value: {{ vip_interface }}
+        - name: vip_cidr
+          value: "{{ vip_cidr }}"
+        - name: cp_enable
+          value: "true"
+        - name: cp_namespace
+          value: kube-system
+        - name: vip_ddns
+          value: "false"
+        - name: svc_enable
+          value: "true"
+        - name: vip_leaderelection
+          value: "true"
+        - name: vip_leaseduration
+          value: "5"
+        - name: vip_renewdeadline
+          value: "3"
+        - name: vip_retryperiod
+          value: "1"
+        - name: address
+          value: {{ vip_address }}
+        image: ghcr.io/kube-vip/kube-vip:{{ kube_vip_image_tag }}
+        imagePullPolicy: Always
+        name: kube-vip
+        resources: {}
+        securityContext:
+          capabilities:
+            add:
+            - NET_ADMIN
+            - NET_RAW
+            - SYS_TIME
+      hostNetwork: true
+      serviceAccountName: kube-vip
+      tolerations:
+      - effect: NoSchedule
+        operator: Exists
+      - effect: NoExecute
+        operator: Exists
+  updateStrategy: {}
+status:
+  currentNumberScheduled: 0
+  desiredNumberScheduled: 0
+  numberMisscheduled: 0
+  numberReady: 0
+
+#######################################################
+# Service LoadBalancers                               #
+# ref: https://kube-vip.io/docs/usage/cloud-provider/ #
+#######################################################
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kube-vip-cloud-controller
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  annotations:
+    rbac.authorization.kubernetes.io/autoupdate: "true"
+  name: system:kube-vip-cloud-controller-role
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update", "list", "put"]
+  - apiGroups: [""]
+    resources: ["configmaps", "endpoints","events","services/status", "leases"]
+    verbs: ["*"]
+  - apiGroups: [""]
+    resources: ["nodes", "services"]
+    verbs: ["list","get","watch","update"]
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: system:kube-vip-cloud-controller-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:kube-vip-cloud-controller-role
+subjects:
+- kind: ServiceAccount
+  name: kube-vip-cloud-controller
+  namespace: kube-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kube-vip-cloud-provider
+  namespace: kube-system
+spec:
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: kube-vip
+      component: kube-vip-cloud-provider
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: kube-vip
+        component: kube-vip-cloud-provider
+    spec:
+      containers:
+      - command:
+        - /kube-vip-cloud-provider
+        - --leader-elect-resource-name=kube-vip-cloud-controller
+        image: ghcr.io/kube-vip/kube-vip-cloud-provider:{{ kube_vip_cloud_provider_image_tag }}
+        name: kube-vip-cloud-provider
+        imagePullPolicy: Always
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 30
+      serviceAccountName: kube-vip-cloud-controller
+      tolerations:
+      - key: node-role.kubernetes.io/master
+        effect: NoSchedule
+      - key: node-role.kubernetes.io/control-plane
+        effect: NoSchedule
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 10
+            preference:
+              matchExpressions:
+              - key: node-role.kubernetes.io/control-plane
+                operator: Exists
+          - weight: 10
+            preference:
+              matchExpressions:
+              - key: node-role.kubernetes.io/master
+                operator: Exists
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kubevip
+  namespace: kube-system
+data:
+  cidr-global: {{ kube_vip_cloud_provider_global_cidr }}

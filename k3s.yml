@@ -1,0 +1,14 @@
+- name: install k3s on kubestar
+  hosts: kubestar
+  roles:
+    - k3s/install
+
+- name: configure kubestar servers (a.k.a. hyperkubes)
+  hosts: hyperkubes
+  roles:
+    - k3s/server
+
+- name: configure kubestar workers (a.k.a. kubes)
+  hosts: kubes
+  roles:
+    - k3s/agent
